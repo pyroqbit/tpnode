@@ -252,23 +252,109 @@ handle_cast(_Msg, State) ->
 handle_info(process, #{preptxm := PreTxMap, presig := PreSig, gbpid:=PID}=State) ->
   case is_process_alive(PID) of
     true ->
-      ?LOG_INFO("skip PreSig ~p, PreTxMap ~p", [PreSig, PreTxMap]),
-      {noreply, State#{preptxm=>#{},
-                       presig=>#{}
-                      }};
+      ?LOG_INFO("Block generation process ~p still alive. Skipping new generation cycle. PreSig ~p, PreTxMap ~p", [PID, PreSig, PreTxMap]),
+      {noreply, State#{preptxm=>#{}, presig=>#{}}}; % Clear accumulated data if process is still running
     false ->
-      handle_info(process, maps:remove(gbpid, State))
+      ?LOG_INFO("Previous block generation process ~p finished. Proceeding.", [PID]),
+      handle_info(process, maps:remove(gbpid, State)) % Recurse to the main handler
   end;
 
-handle_info(process,
-            #{settings:=MySet,
-              preptxm:=PreTXM,
-              mean_time:=MT,
-              entropy:=Ent}=State) ->
-  PreSig=maps:get(presig, State, #{}),
-  GBPID=mkblock_genblk:spawn_generate(MySet, PreTXM, PreSig, MT, Ent),
-  {noreply, State#{preptxm=>#{},
-    presig=>#{},
+handle_info(process, State = #{settings:=MySet, preptxm:=PreTXM, mean_time:=MT, entropy:=Ent}) ->
+    % Check current layer from mass_manager or a local cache if available
+    % For simplicity, let's assume a function tpnode_mass_manager:get_self_layer() exists or is integrated
+    % MyNodeId = State#state.nodeid, % nodeid is part of state
+    % CurrentLayer = tpnode_mass_manager:get_node_layer(MyNodeId), % This function would be needed
+    % For now, let's assume if we are mkblock, we might be in 'local' or other layers.
+    % The decision to use PBFT should ideally come from knowing the current layer's consensus type.
+
+    % Placeholder: Assume 'local' layer uses PBFT proposal mechanism if primary.
+    % In a real system, this check would be more robust, possibly checking chainsettings for layer consensus type.
+    CurrentLayer = local, % Assume local for now for testing this path.
+                           % This should be dynamically determined: tpnode_mass_manager:get_node_layer(State#state.nodeid)
+
+    if CurrentLayer == local ->
+        case tpnode_consensus_router:is_engine_primary() of
+            {true, _} -> % Router might return {Reply, NewRouterState}
+                ?LOG_INFO("Node ~p is PRIMARY for local layer. Attempting to propose a block via PBFT.", [State#state.nodeid]),
+                % Construct a block candidate.
+                % This would involve fetching transactions from txpool, similar to what mkblock_genblk would do.
+                % For now, a placeholder candidate:
+                BlockCandidate = #{
+                    <<"header">> => #{
+                        <<"timestamp">> => erlang:system_time(seconds),
+                        <<"parent_hash">> => blockchain:last_hash(), % Get actual last block hash
+                        <<"height">> => blockchain:height() + 1 % Get actual next height
+                    },
+                    <<"transactions">> => maps:get(maps:keys(PreTXM), PreTXM, []) % Simplified: use prepared TXs
+                                       % In reality, need to fetch from txpool like mkblock_genblk
+                },
+                case tpnode_consensus_router:submit_proposal(BlockCandidate) of
+                    {ok, _} ->
+                        ?LOG_INFO("Block proposal submitted to local consensus engine.");
+                    {error, Reason} ->
+                        ?LOG_ERROR("Failed to submit block proposal to local consensus: ~p", [Reason])
+                end,
+                % The block generation via mkblock_genblk is now handled by the consensus engine's output.
+                % So, we don't call mkblock_genblk:spawn_generate here for the local layer if primary.
+                {noreply, State#{preptxm=>#{}, presig=>{}, mean_time=>[], entropy=>[], nodes=>[]}}; % Reset state
+
+            {false, _} ->
+                ?LOG_INFO("Node ~p is NOT PRIMARY for local layer. No proposal submitted.", [State#state.nodeid]),
+                % If not primary, for PBFT, it just waits. No block generation of its own.
+                % Clearing preptxm etc. as a new leader might propose different things.
+                {noreply, State#{preptxm=>#{}, presig=>{}, mean_time=>[], entropy=>[], nodes=>[]}};
+            {error, Reason} ->
+                ?LOG_ERROR("Could not determine primary status from consensus router for local layer: ~p. Defaulting to old block generation.", [Reason]),
+                % Fallback to old mechanism if router is unavailable or errors out
+                PreSigFallback = maps:get(presig, State, #{}),
+                GBPID = mkblock_genblk:spawn_generate(MySet, PreTXM, PreSigFallback, MT, Ent),
+                {noreply, State#{preptxm=>#{}, presig=>{}, mean_time=>[], entropy=>[], nodes=>[], gbpid=>GBPID}}
+        end;
+
+       CurrentLayer == global -> % Global layer using Narwhal/Tusk
+        % In Narwhal/Tusk, all nodes can submit transactions to the mempool.
+        % Leadership is for proposing headers of batches, not for tx submission itself.
+        % So, no primary check is strictly needed for just submitting transactions.
+        % However, the rate of submission or batch creation might be controlled by primaries.
+        % For now, assume any node in global layer can try to submit its pooled transactions.
+
+        % Fetch transactions from txpool (conceptual)
+        % This needs to be replaced with actual txpool interaction.
+        % For now, use PreTXM as a source of transactions.
+        TransactionsToSubmit = maps:get(maps:keys(PreTXM), PreTXM, []), % Simplified
+
+        if TransactionsToSubmit == [] ->
+            ?LOG_INFO("Global Layer: No transactions from PreTXM to submit to Narwhal/Tusk."),
+            {noreply, State#{preptxm=>#{}, presig=>{}, mean_time=>[], entropy=>[], nodes=>[]}}; % Reset state
+           true ->
+            ?LOG_INFO("Global Layer: Submitting ~p transactions from PreTXM to Narwhal/Tusk.", [length(TransactionsToSubmit)]),
+            lists:foreach(
+                fun({TxID, TxData}) -> % Assuming PreTXM stores {TxID, TxData}
+                    % TxData here should be the actual transaction binary or structure expected by the NIF
+                    % The router's submit_proposal will pass this to global_consensus_engine:handle_tx_submission
+                    case tpnode_consensus_router:submit_proposal(TxData) of
+                        {ok, _} ->
+                            ?LOG_DEBUG("Global Layer: Transaction ~p submitted successfully.", [TxID]);
+                        {error, SubmitReason} ->
+                            ?LOG_ERROR("Global Layer: Failed to submit transaction ~p: ~p", [TxID, SubmitReason])
+                    end
+                end,
+                TransactionsToSubmit
+            ),
+            % After submitting, clear the local batch. Narwhal handles batching.
+            {noreply, State#{preptxm=>#{}, presig=>{}, mean_time=>[], entropy=>[], nodes=>[]}} % Reset state
+        end;
+
+       true -> % Other layers (e.g., regional if not PBFT, or undefined layers) use existing mechanism
+        ?LOG_INFO("Layer is neither 'local' nor 'global' (or not configured for new consensus paths). Using standard block generation."),
+        PreSigStandard = maps:get(presig, State, #{}),
+        GBPIDStandard = mkblock_genblk:spawn_generate(MySet, PreTXM, PreSigStandard, MT, Ent),
+        {noreply, State#{preptxm=>#{}, presig=>{}, mean_time=>[], entropy=>[], nodes=>[], gbpid=>GBPIDStandard}}
+    end;
+
+handle_info(process, State) ->
+    ?LOG_NOTICE("MKBLOCK Blocktime, but I not ready (state missing expected fields for new logic or settings not loaded). State: ~p", [State]),
+    {noreply, load_settings(State)};
     mean_time=>[],
     entropy=>[],
     nodes=>[],

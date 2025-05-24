@@ -563,7 +563,36 @@ handle_call({new_block, #{hash:=BlockHash,
                                        })
                               })
                             }),
+                  
+                  % Cross-Layer Communication: Handle block finality for bridging
+                  MyCurrentLayer = tpnode_mass_manager:get_node_layer(nodekey:get_pub()), % Get current node's layer
+                  FinalizedBlockOriginLayer = maps:get(<<"origin_layer">>, Header, MyCurrentLayer), % Assume current layer if not specified
 
+                  % Only bridge if the block's effective origin is from a lower layer than global
+                  % and if the block itself isn't just a summary from an even lower layer.
+                  % This logic might need refinement based on how 'layer_summary' blocks are structured.
+                  IsSummaryBlock = case maps:get(txs, MBlk, []) of
+                                       [{_, #{<<"type">> := <<"layer_summary">>}}] -> true; % Approximation
+                                       _ -> false
+                                   end,
+
+                  if FinalizedBlockOriginLayer == local andalso not IsSummaryBlock ->
+                      BlockSummaryData = #{
+                          <<"block_hash">> => BlockHash,
+                          <<"tx_hashes">> => [TxId || {TxId,_} <- maps:get(txs, MBlk, [])],
+                          <<"height">> => Hei
+                      },
+                      tpnode_layer_bridge:handle_lower_layer_finality(local, BlockSummaryData);
+                     FinalizedBlockOriginLayer == regional andalso not IsSummaryBlock ->
+                      BlockSummaryData = #{
+                          <<"block_hash">> => BlockHash,
+                          <<"tx_hashes">> => [TxId || {TxId,_} <- maps:get(txs, MBlk, [])],
+                          <<"height">> => Hei
+                      },
+                      tpnode_layer_bridge:handle_lower_layer_finality(regional, BlockSummaryData);
+                     true ->
+                      ok % Do nothing if global or if it's already a summary block being processed
+                  end,
 
                   S1=maps:remove(tmpblock, State),
 

@@ -13,6 +13,23 @@
          as_map/1,
          nodechain/2,
          select_by_path/2,
+         % Node Mass Data
+         get_nodes_mass_data/0,
+         set_nodes_mass_data/1,
+         % Layer Thresholds
+         get_layer_thresholds/0,
+         set_layer_thresholds/1,
+         % Placeholder Committee Configurations
+         get_local_committee/0,
+         set_local_committee/1,
+         get_global_committee/0,
+         set_global_committee/1,
+         % PBFT View
+         get_current_pbft_view/0,
+         set_current_pbft_view/1,
+         % Regional Committee
+         get_regional_committee/0,
+         set_regional_committee/1,
          by_path/1,
          by_path/2,
          all_nodes/2,
@@ -20,6 +37,19 @@
         ]).
 -export([contacts/1,contacts/2]).
 -export([checksum/0]).
+
+% Placeholder record definitions (maps are generally preferred in newer Erlang code)
+%-record(node_mass_data, {node_id :: binary(),
+%                         current_layer :: atom(),
+%                         stake_amount :: integer(),
+%                         activity_score :: integer(),
+%                         performance_score :: integer(),
+%                         calculated_mass :: integer(),
+%                         last_mass_update_timestamp :: integer()}).
+%
+%-record(layer_thresholds, {local :: {integer(), integer()},
+%                           regional :: {integer(), integer()},
+%                           global :: {integer(), integer()}}).
 
 is_net_node(PubKey) ->
   case ets:match(blockchain,{[<<"keys">>,'$1'],'_',<<"set">>,PubKey}) of
@@ -359,9 +389,96 @@ get(Name, Sets, GetChain) ->
        end
   end.
 
+%% Node Mass Data Functions
+get_nodes_mass_data() ->
+    case by_path([<<"nodes_mass_data">>]) of
+        #{} -> []; % Return empty list if not found or empty
+        Data -> Data % Assuming it's stored as a list of maps
+    end.
 
+set_nodes_mass_data(NodesMassDataList) when is_list(NodesMassDataList) ->
+    Settings = all(),
+    NewSettings = maps:put(<<"nodes_mass_data">>, NodesMassDataList, Settings),
+    settings_to_ets(NewSettings).
 
+%% Layer Thresholds Functions
+get_layer_thresholds() ->
+    DefaultThresholds = #{
+        <<"local">> => #{<<"min_mass">> => 0, <<"max_mass">> => 999},
+        <<"regional">> => #{<<"min_mass">> => 1000, <<"max_mass">> => 9999},
+        <<"global">> => #{<<"min_mass">> => 10000, <<"max_mass">> => infinity}
+    },
+    case by_path([<<"layer_thresholds">>]) of
+        #{} -> DefaultThresholds; % Return default if not found
+        ThresholdsMap -> ThresholdsMap
+    end.
 
+set_layer_thresholds(ThresholdsMap) when is_map(ThresholdsMap) ->
+    Settings = all(),
+    NewSettings = maps:put(<<"layer_thresholds">>, ThresholdsMap, Settings),
+    settings_to_ets(NewSettings).
+
+%% Placeholder Committee Configuration Functions
+get_local_committee() ->
+    by_path([<<"committees">>, <<"local">>]).
+
+set_local_committee(CommitteeData) ->
+    Settings = all(),
+    NewSettings = settings:deep_put([<<"committees">>, <<"local">>], CommitteeData, Settings),
+    settings_to_ets(NewSettings).
+
+get_global_committee() ->
+    by_path([<<"committees">>, <<"global">>]).
+
+set_global_committee(CommitteeData) ->
+    Settings = all(),
+    NewSettings = settings:deep_put([<<"committees">>, <<"global">>], CommitteeData, Settings),
+    settings_to_ets(NewSettings).
+
+%% PBFT View Functions
+get_current_pbft_view() ->
+    case by_path([<<"consensus_state">>, <<"pbft_view">>]) of
+        #{} -> 0; % Default to view 0 if not found
+        View when is_integer(View) -> View;
+        _ -> 0 % Default if invalid format
+    end.
+
+set_current_pbft_view(View) when is_integer(View) ->
+    Settings = all(),
+    NewSettings = settings:deep_put([<<"consensus_state">>, <<"pbft_view">>], View, Settings),
+    settings_to_ets(NewSettings).
+
+%% Regional Committee Functions
+get_regional_committee() ->
+    case by_path([<<"committees">>, <<"regional">>]) of
+        #{} -> []; % Default to empty list if not found
+        Committee when is_list(Committee) -> Committee;
+        _ -> [] % Default if invalid format
+    end.
+
+set_regional_committee(Committee) when is_list(Committee) ->
+    Settings = all(),
+    NewSettings = settings:deep_put([<<"committees">>, <<"regional">>], Committee, Settings),
+    settings_to_ets(NewSettings).
+
+%% Narwhal/Tusk Configuration Parameters
+get_narwhal_config_params() ->
+    DefaultConfig = #{
+        <<"batch_size">> => 1000,
+        <<"max_header_delay_ms">> => 100,
+        <<"gc_depth">> => 50
+        % Add other Narwhal/Tusk specific default parameters here
+    },
+    case by_path([<<"consensus_config">>, <<"narwhal_tusk">>]) of
+        #{} -> DefaultConfig;
+        ConfigMap when is_map(ConfigMap) -> maps:merge(DefaultConfig, ConfigMap); % Merge with defaults to ensure all keys exist
+        _ -> DefaultConfig % Default if invalid format
+    end.
+
+set_narwhal_config_params(ConfigMap) when is_map(ConfigMap) ->
+    Settings = all(),
+    NewSettings = settings:deep_put([<<"consensus_config">>, <<"narwhal_tusk">>], ConfigMap, Settings),
+    settings_to_ets(NewSettings).
 checksum() ->
   Settings = all(),
   Settings.

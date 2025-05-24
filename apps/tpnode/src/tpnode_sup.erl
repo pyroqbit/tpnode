@@ -315,6 +315,12 @@ init([]) ->
             { blockchain_updater, {blockchain_updater, start_link, []},
               permanent, 5000, worker, []},
 
+            { tpnode_mass_manager, {tpnode_mass_manager, start_link, []},
+              permanent, 5000, worker, []},
+
+            { tpnode_consensus_router, {tpnode_consensus_router, start_link, []},
+              permanent, 5000, worker, []},
+
             { blockchain_reader, {blockchain_reader, start_link, []},
               permanent, 5000, worker, []},
 
